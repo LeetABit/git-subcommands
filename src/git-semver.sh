@@ -26,7 +26,6 @@ s,single-step         increments version by single step using most relevant comm
 tag-pattern=          pattern for version tag matching.
 major-pattern=        commit message pattern for major changes.
 minor-pattern=        commit message pattern for minor changes.
-patch-pattern=        commit message pattern for patches.
 v,verbose             diagnostic message logging.
 '
 . git-sh-setup
@@ -43,7 +42,6 @@ single_step=
 tag_pattern='^v([0-9]+)\.([0-9]+)\.([0-9]+)$'
 major_pattern='Breaking:*'
 minor_pattern='Feature:*'
-patch_pattern='*'
 verbose=
 
 while test $# != 0
@@ -78,10 +76,6 @@ do
     --minor-pattern)
         shift
         minor_pattern=$1
-        ;;
-    --patch-pattern)
-        shift
-        patch_pattern=$1
         ;;
     -v|--verbose)
         verbose=1
@@ -134,7 +128,7 @@ function main() {
 							changes=2
 						fi
 						;;
-					$patch_pattern)
+					*)
 						if (( $changes < 1 )); then changes=1; fi
 						;;
 				esac
