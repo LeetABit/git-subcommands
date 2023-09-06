@@ -19,4 +19,5 @@
 .gitattributes         code
 .gitignore             code
 *.yml                  code
+*.sh                   nixscript
 *.md                   plaintext

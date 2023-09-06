@@ -1,3 +1,3 @@
-# Template
+# git-subcommands
 
-Template for Leet a Bit projects.
+Project that gathers useful git subcommands.

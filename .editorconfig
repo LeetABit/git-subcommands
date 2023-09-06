@@ -3,19 +3,22 @@
 ####################################################################
 root = true
 
-[*.{yml,md}]
+[*.{sh,yml,md}]
 indent_style = space
 
-[*.{md}]
+[*.{sh,md}]
 indent_size = 4
 
 [*.{yml}]
 indent_size = 2
 
+[*.sh]
+end_of_line = "lf"
+
 [*.{yml,md}]
 end_of_line = "crlf"
 
-[*.{gitattribute,gitignore,editorconfig,yml,md}]
+[*.{gitattribute,gitignore,editorconfig,sh,yml,md}]
 charset = utf-8
 trim_trailing_whitespace = true
 insert_final_newline = true
