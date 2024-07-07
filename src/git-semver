@@ -1,0 +1,408 @@
+#!/bin/bash
+############################################################################
+#   Copyright (c) Hubert Bukowski. All rights reserved.
+#   Licensed under the MIT License.
+#   See License.txt in the project root for full license information.
+#===========================================================================
+#   This script extracts semantic version from the current repository
+#   tree via applied version tags and untagged commit messages.
+############################################################################
+exec 3>&1
+set -e
+shopt -s expand_aliases
+shopt -s xpg_echo
+alias verbose='log_verbose $LINENO $FUNCNAME '
+alias error='log_error $LINENO $FUNCNAME '
+
+#===========================================================================
+#   Configuration
+#===========================================================================
+SUBDIRECTORY_OK='Yes'
+OPTIONS_KEEPDASHDASH=
+OPTIONS_STUCKLONG=
+OPTIONS_SPEC='git semver [options]
+--
+b,no-branch           disables branch information build metadata generation.
+a,no-hash             disables commit SHA information build metadata generation.
+t,no-timestamp        disables timestamp information build metadata generation.
+l,no-local            disables local changes information build metadata generation.
+p,no-pre-relase       disables pre-release version generation.
+release-branch=       name of the branch commits to which shall be threated as version increment. (default: origin/HEAD or current branch)
+tag-pattern=          pattern for version tag matching. "()" will be reeplaced by "([0-9]+)\.([0-9]+)\.([0-9]+)". (default: "^v()$")
+merge-pattern=        pattern for merge commit message, "()" will be used to extract commit message. (default: "^Merge branch ''[^'']+\''$")
+major-pattern=        commit message pattern for major changes. (default: "^(Breaking|Major):")
+minor-pattern=        commit message pattern for minor changes. (default: "^(Feature|Minor):")
+c,change-log          generate changelog for the changes included in the version.
+v,verbose             diagnostic message logging.
+'
+
+. "$(git --exec-path)/git-sh-setup"
+
+#===========================================================================
+#   Initializes script variables and parameters.
+#===========================================================================
+no_branch=
+no_hash=
+no_timestamp=
+no_local=
+no_pre_relase=
+release_branch=
+tag_pattern='^v()$'
+merge_pattern='^Merged PR \d+: (?:Merge [^ ]+ to [^ ]+)(.*)$'
+major_pattern='^(Breaking|Major):'
+minor_pattern='^(Feature|Minor):'
+change_log=
+verbose=
+
+while test $# != 0
+do
+    case "$1" in
+    -b|--no-branch)
+        no_branch=1
+        ;;
+    -a|--no-hash)
+        no_hash=1
+        ;;
+    -t|--no-timestamp)
+        no_timestamp=1
+        ;;
+    -l|--no-local)
+        no_local=1
+        ;;
+    -p|--no-pre-release)
+        no_pre_release=1
+        ;;
+    --release-branch)
+        shift
+        release_branch=$1
+        ;;
+    --tag-pattern)
+        shift
+        tag_pattern=$1
+        ;;
+    --merge-pattern)
+        shift
+        merge_pattern=$1
+        ;;
+    --major-pattern)
+        shift
+        major_pattern=$1
+        ;;
+    --minor-pattern)
+        shift
+        minor_pattern=$1
+        ;;
+    -v|--verbose)
+        verbose=1
+        ;;
+    -c|--change-log)
+        change_log=1
+        ;;
+    --)
+        shift
+        break
+        ;;
+    *)
+        usage
+        ;;
+    esac
+    shift
+done
+
+
+function main {
+    local major=0
+    local minor=1
+    local patch=0
+
+    # Determine release branch.
+    local release_branch=$(get_release_branch $release_branch)
+
+    # Determine current commit.
+    local current_commit=$(get_current_commit)
+
+    # Determine first parent of current commit that has version tag appplied.
+    local versioned_parent_commit=$(get_versioned_parent_and_update_version $current_commit $tag_pattern)
+
+    # Determine commit history to analyze.
+    local commit_history="$(get_commit_history $versioned_parent_commit $current_commit)"
+    local processed_commit=$(echo "$commit_history" | head -n 1)
+    commit_history=$(echo "$commit_history" | sed '1d')
+    
+    while [[ -n $commit_history ]]; do
+        commit_number=$(($commit_number + 1))
+        local commit_to_analyze=$(echo "$commit_history" | head -n 1)
+        commit_history=$(echo "$commit_history" | sed '1d')
+        verbose "Analyzing commit history for commit $commit_to_analyze"
+        local changeImpact=$(evaluate_version_increment $commit_to_analyze $processed_commit)
+        increment_version $changeImpact
+        processed_commit=$commit_to_analyze
+    done
+
+    local semver="$major.$minor.$patch"
+
+    if [[ -z $no_pre_release ]] && [[ -n $commits ]]; then
+        local commit_count="$(echo "$commits" | grep -c '^')"
+        if [[ $commit_count -gt 0 ]]; then semver="$semver-beta.$commit_count"; fi
+    fi
+
+    if [[ -z $no_local ]]; then
+        if [[ $(git status --porcelain) ]]; then
+            semver="$semver-local"
+        fi
+    fi
+
+    if [[ -z $no_branch ]]; then
+        semver="$semver+Branch.$(git rev-parse --abbrev-ref HEAD)"
+    fi
+
+    if [[ -z $no_hash ]]; then
+        semver="$semver+Hash.$(git rev-parse HEAD)"
+    fi
+
+    if [[ -z $no_timestamp ]]; then
+        semver="$semver+Timestamp.$(date -u +%Y%m%d-%H%M%S.%N)"
+    fi
+
+    echo $semver
+
+    if [[ -n $change_log ]]; then
+        readarray -t changes <<< "$(extract_changelog $current_commit $versioned_parent_commit)"
+        for change in "${changes[@]}"; do
+            echo "$change"
+        done
+    fi
+}
+
+
+function extract_changelog {
+    local commit=$1; shift
+    local boundary=$1; shift
+
+    verbose "Extracting changelog between $commit and $boundary"
+    local parents=$(git rev-list --first-parent $commit ^$boundary)
+
+    verbose "Commits:\n$parents"
+    local parent
+
+    for parent in $parents; do
+        verbose "Commit: $parent"
+        local message="$(git show -s --format=%s $parent)"
+        verbose "Message: '$message'"
+        local merged_commits=$(git log --pretty=%P -n 1 $parent | tr ' ' '\n' | sed '1d')
+        local merged_commits_count=$(echo "$merged_commits" | wc -w)
+        if [[ $merged_commits_count -gt 0 ]]; then
+            verbose "Merged commits:\n$merged_commits"
+            verbose "Pattern: $merge_pattern"
+            if [[ $message =~ $merge_pattern ]]; then
+                local message="${BASH_REMATCH[1]}"
+                verbose "Parsed Message: $message"
+                local authors=()
+                local merged_commit
+                for merged_commit in $merged_commits; do
+                    verbose "Checking authors for merged commit and parents $merged_commit"
+                    commits_to_check=$(git rev-list $merged_commit ^$parent^1)
+                    verbose "Commits to check: $commits_to_check"
+                    local commit_to_check
+                    for commit_to_check in $commits_to_check; do
+                        verbose "Checking author for commit $commit_to_check"
+                        author=$(git log --pretty=format:"%an" -n 1 $commit_to_check)
+                        verbose "Author: $author"
+                        if [[ ! " ${authors[@]} " =~ " $author " ]]; then
+                            authors+=($author)
+                        fi
+                    done
+                done
+                echo "$message (${authors[@]})"
+                continue
+            fi
+
+            verbose "Commit is a merge commit with unknown message."
+            for merged_commit in $merged_commits; do
+                verbose "About to call recursievly for $merged_commit and $parent^1"
+                extract_changelog $merged_commit $parent^1
+            done
+        else
+            verbose "Commit is a regular commit."
+            author=$(git log --pretty=format:"%an" -n 1 $commit_to_check)
+            echo "$message ($author)"
+        fi
+    done
+}
+
+
+function evaluate_version_increment {
+    local commit_to_analyze=$1; shift
+    local processed_commit=$1; shift
+
+    local commits=$(git rev-list --parents $commit_to_analyze ^$processed_commit)
+    local unique_commits=$(echo "$commits" | tr ' ' '\n' | sort -u | grep -v "$processed_commit")
+    verbose "List of changes:\n$unique_commits"
+    local changeImpact=0
+    for commit in $unique_commits; do
+        verbose "Checking message for commit $commit for $major_pattern"
+        if [[ "$(git show -s --format=%s $commit)" =~ $major_pattern ]]; then
+            changeImpact=3
+        elif [[ "$(git show -s --format=%s $commit)" =~ $minor_pattern ]]; then
+            if (( $changeImpact < 2 )); then
+                changeImpact=2
+            fi
+        elif (( $changeImpact < 1 )); then
+            changeImpact=1
+        fi
+    done
+
+    echo $changeImpact
+}
+
+
+function get_release_branch {
+    local result=$1
+
+    verbose "Checking release branch with provided '$result'."
+
+    if [[ -z $result ]]; then
+        verbose "Checking remote HEAD as release branch."
+        result="$(git symbolic-ref refs/remotes/origin/HEAD --quiet --short)"
+        result="${result#origin/}"
+    fi
+
+    if [[ -z $result ]]; then
+        verbose "Checking local HEAD as release branch."
+        result="$(git symbolic-ref HEAD --quiet --short)"
+    fi
+
+    if [[ -z $result ]]; then
+        verbose "Checking local branches that contains HEAD."
+        local branches=($(git for-each-ref --format='%(refname:short)' refs/heads/ --contains HEAD))
+        if [ ${#branches[@]} -eq 1 ]; then
+            result="${branches[0]}"
+        else
+            error "Could not determine release branch name. Use --release-branch parameter."
+        fi
+    fi
+
+    verbose "Using release branch with value '$result'."
+    echo $result
+}
+
+
+function get_current_commit {
+    verbose "Checking current commit."
+    local result="$(git rev-parse HEAD)"
+    verbose "Using current commit '$result'"
+
+    echo $result
+}
+
+
+function get_versioned_parent_and_update_version {
+    local commit=$1; shift
+    local tag_pattern=$1; shift
+
+    verbose "Checking versioned parent of commit '$commit' uisng tag pattern '$tag_pattern'."
+    tag_pattern=$(echo "$tag_pattern" | sed -e 's/()/([0-9]+)\.([0-9]+)\.([0-9]+)/g')
+    verbose "Expanded tag pattern is '$tag_pattern'."
+    while :
+    do
+        verbose "Describing commit '$commit'."
+        local result="$(git describe --tags --abbrev=0 --match '?*.?*.?*' --always --first-parent $commit)"
+        verbose "Candidate tag is '$result'."
+        
+        if [[ "$result" =~ $tag_pattern ]]; then
+            verbose "Candidate matches tag pattern."
+            major=${BASH_REMATCH[1]}
+            minor=${BASH_REMATCH[2]}
+            patch=${BASH_REMATCH[3]}
+            break
+        fi
+
+        verbose "Candidate does not match tag pattern. Checking parent."
+        local parent="$(git log --format=%P -n 1 $result | cut -d ' ' -f 1)"
+        verbose "Candidate's parent is '$parent'."
+        if [[ -z $parent ]]; then
+            verbose "Candidate is an initial commit."
+            major=0
+            minor=1
+            patch=0
+            break
+        fi
+
+        commit=$parent
+    done
+
+    result="$(git rev-list -n 1 $result)"
+    verbose "Using base version '$major.$minor.$patch'"
+    verbose "Using versioned parent '$result'"
+    echo $result
+}
+
+
+function get_commit_history {
+    local versioned_parent_commit=$1; shift
+    local current_commit=$1; shift
+
+    verbose "Checking commit history between '$versioned_parent_commit' and '$current_commit'."
+    local result="$(git rev-list --first-parent --reverse $versioned_parent_commit..$current_commit)"
+    result=$(echo "$versioned_parent_commit\n$result" | tr ' ' '\n')
+    verbose "Commits history:\n$result"
+    echo -e "$result"
+}
+
+
+function get_last_versioned_commit {
+    local tag_pattern=$1 | sed -e 's/()/([0-9]+)\.([0-9]+)\.([0-9]+)/g'
+
+    local last_versioned_commit="$(git describe --tags --abbrev=0 --match '?*.?*.?*' --always)"
+
+    if [[ "$last_versioned_commit" =~ $tag_pattern ]]; then
+        echo $last_versioned_commit
+    else
+        echo "$(git rev-list --max-parents=0 HEAD)"
+    fi
+}
+
+
+function increment_version {
+    local change=$1
+
+    if [[ "$change" -eq 3 ]]; then
+        verbose "Incrementing major version."
+        major=$(($major + 1))
+        minor=0
+        patch=0
+    fi
+
+    if [[ "$change" -eq 2 ]]; then
+        verbose "Incrementing minor version."
+        minor=$(($minor + 1))
+        patch=0
+    fi
+
+    if [[ "$change" -eq 1 ]]; then
+        verbose "Incrementing patch version."
+        patch=$(($patch + 1))
+    fi
+}
+
+
+function log_verbose {
+    local line_number=$1;   shift
+    local function_name=$1; shift
+
+    if [[ "$verbose" -eq 1 ]]; then
+        printf "$function_name[$line_number]: %b\n" "$*" >&3
+    fi
+}
+
+
+function log_error {
+    local line_number=$1;   shift
+    local function_name=$1; shift
+
+    printf "$function_name[$line_number]: %b\n" "$*" >&2
+    exit $line_number
+}
+
+
+main "$@"
