@@ -109,12 +109,7 @@ do
     shift
 done
 
-
 function main {
-    local major=0
-    local minor=1
-    local patch=0
-
     # Determine release branch.
     local release_branch=$(get_release_branch $release_branch)
 
@@ -122,12 +117,19 @@ function main {
     local current_commit=$(get_current_commit)
 
     # Determine first parent of current commit that has version tag appplied.
-    local versioned_parent_commit=$(get_versioned_parent_and_update_version $current_commit $tag_pattern)
+    readarray -t versioned_parent <<< "$(get_versioned_parent_and_version $current_commit $tag_pattern)"
+    versioned_parent_commit=${versioned_parent[0]}
+    versioned_parent_version=${versioned_parent[1]}
+    IFS='.' read -r major minor patch <<< "$versioned_parent_version"
 
     # Determine commit history to analyze.
     local commit_history="$(get_commit_history $versioned_parent_commit $current_commit)"
     local processed_commit=$(echo "$commit_history" | head -n 1)
     commit_history=$(echo "$commit_history" | sed '1d')
+    local commit_count
+    if [[ -n $commit_history ]]; then
+      commit_count="$(echo "$commit_history" | grep -c '^')"
+    fi
     
     while [[ -n $commit_history ]]; do
         commit_number=$(($commit_number + 1))
@@ -141,9 +143,8 @@ function main {
 
     local semver="$major.$minor.$patch"
 
-    if [[ -z $no_pre_release ]] && [[ -n $commits ]]; then
-        local commit_count="$(echo "$commits" | grep -c '^')"
-        if [[ $commit_count -gt 0 ]]; then semver="$semver-beta.$commit_count"; fi
+    if [[ -z $no_pre_release ]] && [[ $commit_count -gt 0 ]]; then
+        semver="$semver-beta.$commit_count"
     fi
 
     if [[ -z $no_local ]]; then
@@ -296,7 +297,10 @@ function get_current_commit {
 }
 
 
-function get_versioned_parent_and_update_version {
+function get_versioned_parent_and_version {
+    local major=0
+    local minor=1
+    local patch=0
     local commit=$1; shift
     local tag_pattern=$1; shift
 
@@ -322,9 +326,6 @@ function get_versioned_parent_and_update_version {
         verbose "Candidate's parent is '$parent'."
         if [[ -z $parent ]]; then
             verbose "Candidate is an initial commit."
-            major=0
-            minor=1
-            patch=0
             break
         fi
 
@@ -332,9 +333,10 @@ function get_versioned_parent_and_update_version {
     done
 
     result="$(git rev-list -n 1 $result)"
-    verbose "Using base version '$major.$minor.$patch'"
     verbose "Using versioned parent '$result'"
+    verbose "Using base version '$major.$minor.$patch'"
     echo $result
+    echo "$major.$minor.$patch"
 }
 
 
