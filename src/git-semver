@@ -29,7 +29,7 @@ l,no-local            disables local changes information build metadata generati
 p,no-pre-relase       disables pre-release version generation.
 release-branch=       name of the branch commits to which shall be threated as version increment. (default: origin/HEAD or current branch)
 tag-pattern=          pattern for version tag matching. "()" will be reeplaced by "([0-9]+)\.([0-9]+)\.([0-9]+)". (default: "^v()$")
-merge-pattern=        pattern for merge commit message, "()" will be used to extract commit message. (default: "^Merge branch ''[^'']+\''$")
+merge-pattern=        pattern for merge commit message, "()" will be used to extract commit message. (default: "^Merged PR \d+: \K.*$")
 major-pattern=        commit message pattern for major changes. (default: "^(Breaking|Major):")
 minor-pattern=        commit message pattern for minor changes. (default: "^(Feature|Minor):")
 c,change-log          generate changelog for the changes included in the version.
@@ -48,9 +48,9 @@ no_local=
 no_pre_relase=
 release_branch=
 tag_pattern='^v()$'
-merge_pattern='^Merged PR \d+: (?:Merge [^ ]+ to [^ ]+)(.*)$'
-major_pattern='^(Breaking|Major):'
-minor_pattern='^(Feature|Minor):'
+merge_pattern='^Merged PR \d+: \K.*$'
+major_pattern='^(Breaking):'
+minor_pattern='^(Feature):'
 change_log=
 verbose=
 
@@ -142,27 +142,53 @@ function main {
     done
 
     local semver="$major.$minor.$patch"
+    local pre_release_ver=""
+    local build_ver=""
 
-    if [[ -z $no_pre_release ]] && [[ $commit_count -gt 0 ]]; then
-        semver="$semver-beta.$commit_count"
+    if [[ $no_pre_release -ne 1 ]] && [[ $commit_count -gt 0 ]]; then
+        pre_release_ver="beta.$commit_count"
     fi
 
-    if [[ -z $no_local ]]; then
+    if [[ $no_local -ne 1 ]]; then
         if [[ $(git status --porcelain) ]]; then
-            semver="$semver-local"
+            if [[ -z $pre_release_ver ]]; then
+                pre_release_ver="local"
+            else
+                pre_release_ver="$pre_release_ver.local"
+            fi
         fi
     fi
 
-    if [[ -z $no_branch ]]; then
-        semver="$semver+Branch.$(git rev-parse --abbrev-ref HEAD)"
+    if [[ $no_branch -ne 1 ]]; then
+        branch="$(git rev-parse --abbrev-ref HEAD)"
+        branch="${branch//[^[:alnum:]]/-}"
+        build_ver="Branch.$branch"
     fi
 
-    if [[ -z $no_hash ]]; then
-        semver="$semver+Hash.$(git rev-parse HEAD)"
+    if [[ $no_hash -ne 1 ]]; then
+        local hash="$(git rev-parse HEAD)"
+        if [[ -z $build_ver ]]; then
+            build_ver="Hash.$hash"
+        else
+            build_ver="$build_ver.Hash.$hash"
+        fi
     fi
 
-    if [[ -z $no_timestamp ]]; then
-        semver="$semver+Timestamp.$(date -u +%Y%m%d-%H%M%S.%N)"
+    if [[ $no_timestamp -ne 1 ]]; then
+        local timestamp="$(date -u +%Y%m%d-%H%M%S-%N)"
+        if [[ -z $build_ver ]]; then
+            build_ver="Timestamp.$timestamp"
+        else
+            build_ver="$build_ver.Timestamp.$timestamp"
+        fi
+    fi
+
+    if [[ -n $pre_release_ver ]]; then
+        semver="$semver-$pre_release_ver"
+    fi
+
+    if [[ -n $build_ver ]]; then
+        semver="$semver+$build_ver"
     fi
 
     echo $semver
@@ -191,33 +217,41 @@ function extract_changelog {
         local message="$(git show -s --format=%s $parent)"
         verbose "Message: '$message'"
         local merged_commits=$(git log --pretty=%P -n 1 $parent | tr ' ' '\n' | sed '1d')
+        verbose "Merged Commits: '$merged_commits'"
         local merged_commits_count=$(echo "$merged_commits" | wc -w)
-        if [[ $merged_commits_count -gt 0 ]]; then
-            verbose "Merged commits:\n$merged_commits"
-            verbose "Pattern: $merge_pattern"
-            if [[ $message =~ $merge_pattern ]]; then
-                local message="${BASH_REMATCH[1]}"
-                verbose "Parsed Message: $message"
-                local authors=()
-                local merged_commit
-                for merged_commit in $merged_commits; do
-                    verbose "Checking authors for merged commit and parents $merged_commit"
-                    commits_to_check=$(git rev-list $merged_commit ^$parent^1)
-                    verbose "Commits to check: $commits_to_check"
-                    local commit_to_check
-                    for commit_to_check in $commits_to_check; do
-                        verbose "Checking author for commit $commit_to_check"
-                        author=$(git log --pretty=format:"%an" -n 1 $commit_to_check)
-                        verbose "Author: $author"
-                        if [[ ! " ${authors[@]} " =~ " $author " ]]; then
-                            authors+=($author)
-                        fi
-                    done
-                done
-                echo "$message (${authors[@]})"
-                continue
+        verbose "Pattern: $merge_pattern"
+        merge_match=$(echo "$message" | grep -oP "$merge_pattern")
+        verbose "Parsed Message: '$merge_match'"
+        if [[ -n "$merge_match" ]]; then
+            verbose "Commit is a merge commit with extracted message."
+            message=$merge_match
+            if [[ $merged_commits_count -eq 0 ]]; then
+                merged_commits=$parent
             fi
 
+            for merged_commit in $merged_commits; do
+                authors=""
+                verbose "Checking authors for merged commit and parents $merged_commit"
+                commits_to_check=$(git rev-list $merged_commit ^$parent^1)
+                verbose "Commits to check: $commits_to_check"
+                local commit_to_check
+                for commit_to_check in $commits_to_check; do
+                    verbose "Checking author for commit $commit_to_check"
+                    author=$(git log --pretty=format:"%an" -n 1 $commit_to_check)
+                    verbose "Author: $author"
+                    if [[ ! " ${authors[@]} " =~ " $author " ]]; then
+                        if [[ -n "$authors" ]]; then
+                            authors+=", $author"
+                        else
+                            authors="$author"
+                        fi
+                    fi
+                done
+            done
+            
+            verbose "Result '$message ($authors)'"
+            echo "$message ($authors)"
+        elif [[ $merged_commits_count -gt 0 ]]; then
             verbose "Commit is a merge commit with unknown message."
             for merged_commit in $merged_commits; do
                 verbose "About to call recursievly for $merged_commit and $parent^1"
@@ -225,7 +259,8 @@ function extract_changelog {
             done
         else
             verbose "Commit is a regular commit."
-            author=$(git log --pretty=format:"%an" -n 1 $commit_to_check)
+            author=$(git log --pretty=format:"%an" -n 1 $parent)
+            verbose "Result '$message ($author)'"
             echo "$message ($author)"
         fi
     done
@@ -241,10 +276,13 @@ function evaluate_version_increment {
     verbose "List of changes:\n$unique_commits"
     local changeImpact=0
     for commit in $unique_commits; do
-        verbose "Checking message for commit $commit for $major_pattern"
-        if [[ "$(git show -s --format=%s $commit)" =~ $major_pattern ]]; then
+        verbose "Checking message for commit $commit"
+        major_match=$(git show -s --format=%s $commit | grep -oP "$major_pattern")
+        minor_match=$(git show -s --format=%s $commit | grep -oP "$minor_pattern")
+        
+        if [[ -n "$major_match" ]]; then
             changeImpact=3
-        elif [[ "$(git show -s --format=%s $commit)" =~ $minor_pattern ]]; then
+        elif [[ -n "$minor_match" ]]; then
             if (( $changeImpact < 2 )); then
                 changeImpact=2
             fi
@@ -405,6 +443,5 @@ function log_error {
     printf "$function_name[$line_number]: %b\n" "$*" >&2
     exit $line_number
 }
-
 
 main "$@"
