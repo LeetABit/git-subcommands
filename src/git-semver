@@ -27,6 +27,7 @@ a,no-hash             disables commit SHA information build metadata generation.
 t,no-timestamp        disables timestamp information build metadata generation.
 l,no-local            disables local changes information build metadata generation.
 p,no-pre-relase       disables pre-release version generation.
+r,release             disables all pre-release and build metadata generation.
 release-branch=       name of the branch commits to which shall be threated as version increment. (default: origin/HEAD or current branch)
 tag-pattern=          pattern for version tag matching. "()" will be reeplaced by "([0-9]+)\.([0-9]+)\.([0-9]+)". (default: "^v()$")
 merge-pattern=        pattern for merge commit message, "()" will be used to extract commit message. (default: "^Merged PR \d+: \K.*$")
@@ -70,6 +71,13 @@ do
         no_local=1
         ;;
     -p|--no-pre-release)
+        no_pre_release=1
+        ;;
+    -r|--release)
+        no_branch=1
+        no_hash=1
+        no_timestamp=1
+        no_local=1
         no_pre_release=1
         ;;
     --release-branch)
