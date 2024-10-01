@@ -29,8 +29,10 @@ l,no-local            disables local changes information build metadata generati
 p,no-pre-relase       disables pre-release version generation.
 r,release             disables all pre-release and build metadata generation.
 release-branch=       name of the branch commits to which shall be threated as version increment. (default: origin/HEAD or current branch)
-tag-pattern=          pattern for version tag matching. "()" will be reeplaced by "([0-9]+)\.([0-9]+)\.([0-9]+)". (default: "^v()$")
-merge-pattern=        pattern for merge commit message, "()" will be used to extract commit message. (default: "^Merged PR \d+: \K.*$")
+tag-pattern=          pattern for version tag matching, "()" will be reeplaced by "([0-9]+)\.([0-9]+)\.([0-9]+)". (default: "^v()$")
+merge-pattern=        pattern for merge commit message, "\K" will be used to extract commit message. (default: "^Merged PR \d+: \K.*$")
+revert-pattern=       pattern for revert commit message, "\K" will be used to extract commit message. (default: "^Revert "\K"")
+reaaply-pattern=      pattern for reapply commit message, "\K" will be used to extract commit message. (default: "^Reapply "\K"")
 major-pattern=        commit message pattern for major changes. (default: "^(Breaking|Major):")
 minor-pattern=        commit message pattern for minor changes. (default: "^(Feature|Minor):")
 c,change-log          generate changelog for the changes included in the version.
@@ -50,6 +52,8 @@ no_pre_relase=
 release_branch=
 tag_pattern='^v()$'
 merge_pattern='^Merged PR \d+: \K.*$'
+revert_pattern='^Revert "\K.*"$'
+reapply_pattern='^Reapply "\K.*"$'
 major_pattern='^(Breaking):'
 minor_pattern='^(Feature):'
 change_log=
@@ -91,6 +95,14 @@ do
     --merge-pattern)
         shift
         merge_pattern=$1
+        ;;
+    --revert-pattern)
+        shift
+        revert_pattern=$1
+        ;;
+    --reapply-pattern)
+        shift
+        reapply_pattern=$1
         ;;
     --major-pattern)
         shift
@@ -214,6 +226,8 @@ function extract_changelog {
     local commit=$1; shift
     local boundary=$1; shift
 
+    local reverts=()
+
     verbose "Extracting changelog between $commit and $boundary"
     local parents=$(git rev-list --first-parent $commit ^$boundary)
 
@@ -224,52 +238,71 @@ function extract_changelog {
         verbose "Commit: $parent"
         local message="$(git show -s --format=%s $parent)"
         verbose "Message: '$message'"
+        verbose "Reapply Pattern: $merge_pattern"
+        reapply_match=$(echo "$message" | grep -oP "$reapply_pattern")
+        verbose "Reapply Message: '$reapply_match'"
+        if [[ -n "$reapply_match" ]]; then
+            message=("${reapply_match::-1}")
+            verbose "Reapplied Message: '$message'"
+        fi
+
+        if [[ " ${reverts[@]} " =~ " $message " ]]; then
+            continue
+        fi
+
         local merged_commits=$(git log --pretty=%P -n 1 $parent | tr ' ' '\n' | sed '1d')
         verbose "Merged Commits: '$merged_commits'"
         local merged_commits_count=$(echo "$merged_commits" | wc -w)
-        verbose "Pattern: $merge_pattern"
-        merge_match=$(echo "$message" | grep -oP "$merge_pattern")
-        verbose "Parsed Message: '$merge_match'"
-        if [[ -n "$merge_match" ]]; then
-            verbose "Commit is a merge commit with extracted message."
-            message=$merge_match
-            if [[ $merged_commits_count -eq 0 ]]; then
-                merged_commits=$parent
-            fi
-
-            for merged_commit in $merged_commits; do
-                authors=""
-                verbose "Checking authors for merged commit and parents $merged_commit"
-                commits_to_check=$(git rev-list $merged_commit ^$parent^1)
-                verbose "Commits to check: $commits_to_check"
-                local commit_to_check
-                for commit_to_check in $commits_to_check; do
-                    verbose "Checking author for commit $commit_to_check"
-                    author=$(git log --pretty=format:"%an" -n 1 $commit_to_check)
-                    verbose "Author: $author"
-                    if [[ ! " ${authors[@]} " =~ " $author " ]]; then
-                        if [[ -n "$authors" ]]; then
-                            authors+=", $author"
-                        else
-                            authors="$author"
-                        fi
-                    fi
-                done
-            done
-            
-            verbose "Result '$message ($authors)'"
-            echo "$message ($authors)"
-        elif [[ $merged_commits_count -gt 0 ]]; then
-            verbose "Commit is a merge commit with unknown message."
-            for merged_commit in $merged_commits; do
-                verbose "About to call recursievly for $merged_commit and $parent^1"
-                extract_changelog $merged_commit $parent^1
-            done
+        verbose "Revert Pattern: $merge_pattern"
+		revert_match=$(echo "$message" | grep -oP "$revert_pattern")
+		verbose "Revert Message: '$revert_match'"
+        if [[ -n "$revert_match" ]]; then
+            reverts+=("${revert_match::-1}")
         else
-            verbose "Commit is a regular commit."
-            author=$(git log --pretty=format:"%an" -n 1 $parent)
-            verbose "Result '$message ($author)'"
-            echo "$message ($author)"
+            verbose "Merge Pattern: $merge_pattern"
+            merge_match=$(echo "$message" | grep -oP "$merge_pattern")
+            verbose "Parsed Message: '$merge_match'"
+            if [[ -n "$merge_match" ]]; then
+                verbose "Commit is a merge commit with extracted message."
+                message=$merge_match
+                if [[ $merged_commits_count -eq 0 ]]; then
+                    merged_commits=$parent
+                fi
+
+                for merged_commit in $merged_commits; do
+                    authors=""
+                    verbose "Checking authors for merged commit and parents $merged_commit"
+                    commits_to_check=$(git rev-list $merged_commit ^$parent^1)
+                    verbose "Commits to check: $commits_to_check"
+                    local commit_to_check
+                    for commit_to_check in $commits_to_check; do
+                        verbose "Checking author for commit $commit_to_check"
+                        author=$(git log --pretty=format:"%an" -n 1 $commit_to_check)
+                        verbose "Author: $author"
+                        if [[ ! " ${authors[@]} " =~ " $author " ]]; then
+                            if [[ -n "$authors" ]]; then
+                                authors+=", $author"
+                            else
+                                authors="$author"
+                            fi
+                        fi
+                    done
+                done
+                
+                verbose "Result '$message ($authors)'"
+                echo "$message ($authors)"
+            elif [[ $merged_commits_count -gt 0 ]]; then
+                verbose "Commit is a merge commit with unknown message."
+                for merged_commit in $merged_commits; do
+                    verbose "About to call recursievly for $merged_commit and $parent^1"
+                    extract_changelog $merged_commit $parent^1
+                done
+            else
+                verbose "Commit is a regular commit."
+                author=$(git log --pretty=format:"%an" -n 1 $parent)
+                verbose "Result '$message ($author)'"
+                echo "$message ($author)"
+            fi
         fi
     done
 }
